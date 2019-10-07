@@ -401,12 +401,16 @@ class Worker(multiprocessing.Process):
                 except BlockingIOError:  # as e:
                     # logger.exception('BlockingIOError', exc_info=e)
                     continue
-                work = self.work_klass(
-                    fileno=conn.fileno(),
-                    addr=addr,
-                    **self.kwargs)
-                work.setDaemon(True)
-                work.start()
+                try:
+                    work = self.work_klass(
+                        fileno=conn.fileno(),
+                        addr=addr,
+                        **self.kwargs)
+                    work.setDaemon(True)
+                    work.start()
+                except TcpConnectionUninitializedException:
+                    logger.error('TcpConnectionUninitializedException while handling new connection')
+                    continue
         except KeyboardInterrupt:
             pass
         finally:
