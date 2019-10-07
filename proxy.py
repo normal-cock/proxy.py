@@ -36,6 +36,9 @@ from urllib import parse as urlparse
 
 from typing_extensions import Protocol
 
+import socks
+socks.set_default_proxy(socks.SOCKS5, "localhost", 1087)
+
 if os.name != 'nt':
     import resource
 
@@ -233,17 +236,19 @@ class TcpConnection(ABC):
         try:
             ip = ipaddress.ip_address(addr[0])
             if ip.version == 4:
-                conn = socket.socket(
+                conn = socks.socket(
                     socket.AF_INET, socket.SOCK_STREAM, 0)
                 conn.connect(addr)
             else:
-                conn = socket.socket(
+                conn = socks.socket(
                     socket.AF_INET6, socket.SOCK_STREAM, 0)
                 conn.connect((addr[0], addr[1], 0, 0))
         except ValueError:
             # Not a valid IP address, most likely its a domain name,
             # try to establish dual stack IPv4/IPv6 connection.
-            conn = socket.create_connection(addr)
+            conn =socks.socksocket()
+            conn.connect((addr[0], addr[1]))
+            # conn = socket.create_connection(addr)
         return conn
 
 
