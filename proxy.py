@@ -80,7 +80,7 @@ DEFAULT_PID_FILE = None
 DEFAULT_NUM_WORKERS = 0
 DEFAULT_PLUGINS = ''    # Comma separated list of plugins
 DEFAULT_VERSION = False
-DEFAULT_LOG_FORMAT = '%(asctime)s - %(levelname)s - pid:%(process)d - %(funcName)s:%(lineno)d - %(message)s'
+DEFAULT_LOG_FORMAT = '%(asctime)s - %(levelname)s - pid:%(process)d - tid:%(thread)d - %(funcName)s:%(lineno)d - %(message)s'
 DEFAULT_LOG_FILE = None
 
 # Set to True if under test
@@ -188,7 +188,11 @@ class TcpConnection(ABC):
 
     def send(self, data: bytes) -> int:
         """Users must handle BrokenPipeError exceptions"""
-        return self.connection.send(data)
+        try:
+            sent = self.connection.send(data)
+        except (ssl.SSLWantReadError, ssl.SSLWantWriteError):
+            sent = 0
+        return sent
 
     def recv(self, buffer_size: int = DEFAULT_BUFFER_SIZE) -> Optional[bytes]:
         try:
@@ -198,6 +202,8 @@ class TcpConnection(ABC):
                     'received %d bytes from %s' %
                     (len(data), self.tag))
                 return data
+        except (ssl.SSLWantReadError, ssl.SSLWantWriteError):
+            return None
         except socket.error as e:
             if e.errno == errno.ECONNRESET:
                 logger.debug('%r' % e)
@@ -783,7 +789,7 @@ class ProtocolConfig:
 
     def __init__(
             self,
-            auth_code: Optional[bytes] = DEFAULT_BASIC_AUTH,
+            auth_codes: Optional[Tuple[bytes]] = DEFAULT_BASIC_AUTH,
             server_recvbuf_size: int = DEFAULT_SERVER_RECVBUF_SIZE,
             client_recvbuf_size: int = DEFAULT_CLIENT_RECVBUF_SIZE,
             pac_file: Optional[str] = DEFAULT_PAC_FILE,
@@ -801,7 +807,7 @@ class ProtocolConfig:
                             ipaddress.IPv6Address] = DEFAULT_IPV6_HOSTNAME,
             port: int = DEFAULT_PORT,
             backlog: int = DEFAULT_BACKLOG) -> None:
-        self.auth_code = auth_code
+        self.auth_codes = auth_codes
         self.server_recvbuf_size = server_recvbuf_size
         self.client_recvbuf_size = client_recvbuf_size
         self.pac_file = pac_file
@@ -1192,9 +1198,9 @@ class HttpProxyPlugin(ProtocolHandlerPlugin):
         return False
 
     def authenticate(self) -> None:
-        if self.config.auth_code:
+        if self.config.auth_codes:
             if b'proxy-authorization' not in self.request.headers or \
-                    self.request.headers[b'proxy-authorization'][1] != self.config.auth_code:
+                    self.request.headers[b'proxy-authorization'][1] not in self.config.auth_codes:
                 raise ProxyAuthenticationFailed()
 
     def connect_upstream(self) -> None:
@@ -1803,13 +1809,10 @@ def load_plugins(plugins: bytes) -> Dict[bytes, List[type]]:
         if plugin == b'':
             continue
         module_name, klass_name = plugin.rsplit(DOT, 1)
-        if module_name == 'proxy':
-            klass = getattr(__name__, text_(klass_name))
-        else:
-            klass = getattr(
-                importlib.import_module(
-                    text_(module_name)),
-                text_(klass_name))
+        real_module_name = __name__ if module_name == b'proxy' else text_(module_name)
+        module = importlib.import_module(real_module_name)
+        klass = getattr(module, text_(klass_name))
+
         base_klass = inspect.getmro(klass)[1]
         p[bytes_(base_klass.__name__)].append(klass)
         logger.info(
@@ -1858,6 +1861,7 @@ def init_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--basic-auth',
         type=str,
+        action='append',
         default=DEFAULT_BASIC_AUTH,
         help='Default: No authentication. Specify colon separated user:password '
              'to enable basic authentication.')
@@ -2019,9 +2023,10 @@ def main(input_args: List[str]) -> None:
         setup_logger(args.log_file, args.log_level, args.log_format)
         set_open_file_limit(args.open_file_limit)
 
-        auth_code = None
+        auth_codes = []
         if args.basic_auth:
-            auth_code = b'Basic %s' % base64.b64encode(bytes_(args.basic_auth))
+            for single_basic_auth in args.basic_auth:
+                auth_codes.append(b'Basic %s' % base64.b64encode(bytes_(single_basic_auth)))
 
         default_plugins = ''
         if not args.disable_http_proxy:
@@ -2032,7 +2037,7 @@ def main(input_args: List[str]) -> None:
             default_plugins += 'proxy.HttpWebServerPacFilePlugin,'
 
         config = ProtocolConfig(
-            auth_code=auth_code,
+            auth_codes=tuple(auth_codes),
             server_recvbuf_size=args.server_recvbuf_size,
             client_recvbuf_size=args.client_recvbuf_size,
             pac_file=bytes_(args.pac_file),
